@@ -6,15 +6,11 @@ import threading
 
 from flask import Flask, jsonify
 from pyrogram import Client
-from pyrogram.errors import (
-    AuthKeyUnregistered,
-    SessionRevoked
-)
 
 # ---------------- CONFIG ----------------
 
 API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
+API_HASH = os.getenv("API_HASH", "").strip()
 SESSION_STRING = os.getenv("SESSIONS", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -31,23 +27,45 @@ logger = logging.getLogger("SEM-VC-JOINER")
 
 app = Flask(__name__)
 
+telegram_status = {
+    "connected": False,
+    "user": None,
+    "error": None
+}
+
+
 @app.route("/")
 def home():
     return jsonify({
         "project": "SEM VC JOINER",
-        "status": "online"
+        "status": "online",
+        "telegram_connected": telegram_status["connected"]
     })
+
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "healthy"}), 200
+    return jsonify({
+        "status": "healthy",
+        "telegram_connected": telegram_status["connected"]
+    }), 200
 
-# ---------------- PYROGRAM ----------------
+
+@app.route("/status")
+def status():
+    return jsonify(telegram_status)
+
+
+# ---------------- TELEGRAM ----------------
 
 async def telegram_manager():
 
     if not API_ID or not API_HASH or not SESSION_STRING:
-        logger.error("API_ID, API_HASH or SESSIONS is missing.")
+        logger.error(
+            "Missing environment variables: "
+            "API_ID, API_HASH or SESSIONS"
+        )
+        telegram_status["error"] = "Missing environment variables"
         return
 
     client = Client(
@@ -58,50 +76,73 @@ async def telegram_manager():
         in_memory=True
     )
 
+    started = False
+
     try:
+        logger.info("Connecting to Telegram...")
+
         await client.start()
+        started = True
 
         me = await client.get_me()
 
+        telegram_status["connected"] = True
+        telegram_status["user"] = (
+            me.username or me.first_name or "Telegram User"
+        )
+        telegram_status["error"] = None
+
         logger.info(
-            "Pyrogram connected successfully: %s",
-            me.first_name or "Telegram User"
+            "Telegram connected successfully: %s",
+            telegram_status["user"]
         )
 
-        # Keep client connected while service is running.
+        # Keep Telegram client running
         await asyncio.Event().wait()
 
-    except (AuthKeyUnregistered, SessionRevoked):
-        logger.error("Session is revoked or no longer authorized.")
+    except Exception as e:
+        telegram_status["connected"] = False
+        telegram_status["error"] = str(e)
 
-    except Exception as error:
-        logger.error(
-            "Pyrogram connection failed: %s",
-            type(error).__name__
-        )
+        logger.exception("Pyrogram connection failed")
 
     finally:
-        try:
-            await client.stop()
-        except Exception:
-            pass
+        if started:
+            try:
+                await client.stop()
+                logger.info("Telegram client stopped.")
+            except Exception:
+                logger.exception("Error while stopping Telegram client")
+
+        telegram_status["connected"] = False
+
+
+# ---------------- THREAD ----------------
 
 def start_telegram():
-    asyncio.run(telegram_manager())
+    try:
+        asyncio.run(telegram_manager())
+    except Exception:
+        logger.exception("Telegram thread crashed")
 
-# ---------------- START ----------------
+
+# ---------------- MAIN ----------------
 
 if __name__ == "__main__":
 
-    threading.Thread(
-        target=start_telegram,
-        daemon=True
-    ).start()
-
     logger.info("SEM VC JOINER starting...")
+
+    telegram_thread = threading.Thread(
+        target=start_telegram,
+        name="TelegramThread",
+        daemon=True
+    )
+
+    telegram_thread.start()
 
     app.run(
         host="0.0.0.0",
         port=PORT,
+        debug=False,
         use_reloader=False
     )
