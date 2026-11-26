@@ -14,19 +14,23 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 
 SESSIONS = [
-    s.strip()
-    for s in os.getenv("SESSIONS", "").splitlines()
-    if s.strip()
+    session.strip()
+    for session in os.getenv("SESSIONS", "").splitlines()
+    if session.strip()
 ]
+
+PORT = int(os.getenv("PORT", "10000"))
 
 # ---------------- LOGGING ----------------
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# ---------------- WEB SERVER ----------------
+logger = logging.getLogger("SEM-VC-JOINER")
+
+# ---------------- FLASK ----------------
 
 app = Flask(__name__)
 
@@ -34,71 +38,103 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "project": "SEM VC JOINER",
-        "status": "Running"
+        "status": "online",
+        "sessions_configured": len(SESSIONS)
     })
 
 @app.route("/health")
 def health():
     return jsonify({"status": "healthy"}), 200
 
-# ---------------- TELEGRAM MANAGER ----------------
+# ---------------- TELEGRAM ----------------
 
 clients = []
 
-async def telegram_manager():
+async def validate_session(index, session):
+    client = None
 
-    if not API_ID or not API_HASH:
-        logging.error("API_ID or API_HASH missing")
-        return
-
-    if not SESSIONS:
-        logging.error("No sessions configured")
-        return
-
-    for index, session in enumerate(SESSIONS, start=1):
-
+    try:
         client = TelegramClient(
             StringSession(session),
             API_ID,
             API_HASH
         )
 
-        try:
-            await client.connect()
+        await client.connect()
 
-            if await client.is_user_authorized():
-                clients.append(client)
-                logging.info(f"Account {index}: Connected")
+        if not await client.is_user_authorized():
+            logger.warning("Account %s: Session is not authorized", index)
+            return
 
-            else:
-                logging.warning(
-                    f"Account {index}: Unauthorized session"
-                )
+        me = await client.get_me()
+
+        logger.info(
+            "Account %s: Connected successfully (%s)",
+            index,
+            me.first_name or "Telegram User"
+        )
+
+        clients.append(client)
+        client = None
+
+    except Exception as error:
+        logger.error(
+            "Account %s: Connection failed (%s)",
+            index,
+            type(error).__name__
+        )
+
+    finally:
+        if client:
+            try:
                 await client.disconnect()
+            except Exception:
+                pass
 
-        except Exception:
-            logging.exception(f"Account {index}: Connection failed")
 
-    logging.info(
-        f"Connected accounts: {len(clients)}/{len(SESSIONS)}"
+async def telegram_manager():
+    if not API_ID or not API_HASH:
+        logger.error("API_ID or API_HASH is missing.")
+        return
+
+    if not SESSIONS:
+        logger.error("No sessions found in SESSIONS environment variable.")
+        return
+
+    logger.info("Starting session validation...")
+    logger.info("Total sessions configured: %s", len(SESSIONS))
+
+    for index, session in enumerate(SESSIONS, start=1):
+        await validate_session(index, session)
+
+    logger.info(
+        "Session validation finished. Connected accounts: %s",
+        len(clients)
     )
 
-    await asyncio.Event().wait()
+    # Keep authorized clients connected.
+    while True:
+        await asyncio.sleep(60)
 
 
 def start_telegram():
+    try:
+        asyncio.run(telegram_manager())
+    except Exception as error:
+        logger.error("Telegram manager stopped: %s", type(error).__name__)
 
-    asyncio.run(telegram_manager())
 
+# ---------------- START ----------------
 
 if __name__ == "__main__":
-
     threading.Thread(
         target=start_telegram,
         daemon=True
     ).start()
 
+    logger.info("SEM VC JOINER web server starting...")
     app.run(
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 10000))
+        port=PORT,
+        use_reloader=False
     )
